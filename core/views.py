@@ -1,90 +1,151 @@
+from rest_framework import viewsets, status
 from django.db import transaction
 from django.shortcuts import render, redirect
 from .models import CalculoCredito, ParametroCalculo, TipoResiduo, Condominio
+from rest_framework import viewsets
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from .serializers import (
+    TipoResiduoSerializer, 
+    CalculoCreditoSerializer, 
+    CondominioSerializer, 
+    ParametroCalculoSerializer
+)
 
-class CalculoCreditoView:
+class CalculoCreditoViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    queryset = CalculoCredito.objects.all()
+    serializer_class = CalculoCreditoSerializer
+
     @transaction.atomic
-    def calcular_credito_carbono(self, request):
+    def create(self, request, *args, **kwargs):
         """
-        Método para calcular crédito de carbono baseado nos parâmetros armazenados
+        Sobrescreve o método create para realizar o cálculo de crédito de carbono 
+        antes de salvar o objeto
         """
-        if request.method == 'POST':
-            # Dados do formulário
-            condominio_id = request.POST.get('condominio')
-            tipo_residuo_id = request.POST.get('tipo_residuo')
-            peso_residuo = float(request.POST.get('peso_residuo'))
+        serializer = self.get_serializer(data=request.data)
+        
+        if serializer.is_valid():
+            # Extrair dados validados
+            condominio_id = serializer.validated_data.get('condominio').id
+            tipo_residuo_id = serializer.validated_data.get('tipo_residuo').id
+            peso_residuo = serializer.validated_data.get('peso_residuo')
             
             try:
                 # Busca os parâmetros de cálculo para o tipo de resíduo
                 parametro = ParametroCalculo.objects.get(tipo_residuo_id=tipo_residuo_id)
                 
                 # Cálculo de emissão de carbono
-                # Emissão atual: peso * fator de emissão padrão
                 emissao_carbono_atual = peso_residuo * parametro.fator_emissao_padrao
+                emissao_carbono_reciclagem = emissao_carbono_atual - (emissao_carbono_atual * (1 - parametro.eficiencia_reciclagem/100))
                 
-                # Emissão na reciclagem: considera a eficiência de redução
-                emissao_carbono_reciclagem = emissao_carbono_atual * (1 - parametro.eficiencia_reciclagem/100)
+                # Atualiza os valores calculados no serializer
+                serializer.validated_data['emissao_carbono_atual'] = emissao_carbono_atual
+                serializer.validated_data['emissao_carbono_reciclagem'] = emissao_carbono_reciclagem
                 
-                # Cria o registro de cálculo de crédito
-                calculo_credito = CalculoCredito.objects.create(
-                    condominio_id=condominio_id,
-                    tipo_residuo_id=tipo_residuo_id,
-                    peso_residuo=peso_residuo,
-                    emissao_carbono_atual=emissao_carbono_atual,
-                    emissao_carbono_reciclagem=emissao_carbono_reciclagem
-                )
+                # Salva o objeto (o método save do model calculará economia_carbono)
+                self.perform_create(serializer)
                 
-                return render(request, 'resultado_calculo.html', {
-                    'calculo': calculo_credito,
-                    'economia_carbono': calculo_credito.economia_carbono
-                })
-            
+                headers = self.get_success_headers(serializer.data)
+                return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+                
             except ParametroCalculo.DoesNotExist:
-                # Trata caso não existam parâmetros para o tipo de resíduo
-                return render(request, 'erro.html', {
-                    'mensagem': 'Parâmetros de cálculo não encontrados para este tipo de resíduo.'
-                })
+                return Response(
+                    {'erro': 'Parâmetros de cálculo não encontrados para este tipo de resíduo.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             except Exception as e:
-                # Trata outros erros de cálculo
-                return render(request, 'erro.html', {
-                    'mensagem': f'Erro no cálculo: {str(e)}'
-                })
-
-# Exemplo de como popular os parâmetros iniciais
-def popular_parametros_calculo():
-    """
-    Função para popular o banco de dados com parâmetros iniciais de cálculo
-    """
-    # Tipos de resíduo
-    tipos = [
-        ('Papel', 'Resíduos de papel e papelão'),
-        ('Plástico', 'Resíduos plásticos'),
-        ('Vidro', 'Resíduos de vidro'),
-        ('Orgânico', 'Resíduos orgânicos')
-    ]
-    
-    for nome, descricao in tipos:
-        # Cria o tipo de resíduo se não existir
-        tipo_residuo, created = TipoResiduo.objects.get_or_create(
-            nome=nome, 
-            defaults={'descricao': descricao}
-        )
+                return Response(
+                    {'erro': f'Erro no cálculo: {str(e)}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
         
-        # Cria ou atualiza os parâmetros de cálculo
-        ParametroCalculo.objects.update_or_create(
-            tipo_residuo=tipo_residuo,
-            defaults={
-                'fator_emissao_padrao': {
-                    'Papel': 0.5,      # kg CO2 por kg de papel
-                    'Plástico': 1.5,   # kg CO2 por kg de plástico
-                    'Vidro': 0.3,      # kg CO2 por kg de vidro
-                    'Orgânico': 0.7    # kg CO2 por kg de orgânico
-                }[nome],
-                'eficiencia_reciclagem': {
-                    'Papel': 70,       # 70% de redução na emissão
-                    'Plástico': 60,    # 60% de redução na emissão
-                    'Vidro': 75,       # 75% de redução na emissão
-                    'Orgânico': 50     # 50% de redução na emissão
-                }[nome]
-            }
-        )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        """
+        Sobrescreve o método update para recalcular o crédito de carbono
+        antes de atualizar o objeto
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        
+        if serializer.is_valid():
+            # Verifica se os campos relevantes para cálculo foram alterados
+            recalcular = False
+            
+            if 'tipo_residuo' in serializer.validated_data or 'peso_residuo' in serializer.validated_data:
+                recalcular = True
+            
+            if recalcular:
+                # Obtém os valores atualizados ou usa os existentes se não foram alterados
+                tipo_residuo_id = serializer.validated_data.get('tipo_residuo', instance.tipo_residuo).id
+                peso_residuo = serializer.validated_data.get('peso_residuo', instance.peso_residuo)
+                
+                try:
+                    # Busca os parâmetros de cálculo para o tipo de resíduo
+                    parametro = ParametroCalculo.objects.get(tipo_residuo_id=tipo_residuo_id)
+                    
+                    # Cálculo de emissão de carbono
+                    emissao_carbono_atual = peso_residuo * parametro.fator_emissao_padrao
+                    emissao_carbono_reciclagem = emissao_carbono_atual - (emissao_carbono_atual * (1 - parametro.eficiencia_reciclagem/100))
+
+                    
+                    # Atualiza os valores calculados no serializer
+                    serializer.validated_data['emissao_carbono_atual'] = emissao_carbono_atual
+                    serializer.validated_data['emissao_carbono_reciclagem'] = emissao_carbono_reciclagem
+                    
+                except ParametroCalculo.DoesNotExist:
+                    return Response(
+                        {'erro': 'Parâmetros de cálculo não encontrados para este tipo de resíduo.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                except Exception as e:
+                    return Response(
+                        {'erro': f'Erro no cálculo: {str(e)}'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+            
+            # Salva o objeto (o método save do model calculará economia_carbono)
+            self.perform_update(serializer)
+            
+            if getattr(instance, '_prefetched_objects_cache', None):
+                # Se a instância tiver objetos pré-carregados, limpe-os.
+                instance._prefetched_objects_cache = {}
+            
+            return Response(serializer.data)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+class TipoResiduoViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    queryset = TipoResiduo.objects.all()
+    serializer_class = TipoResiduoSerializer
+
+class CondominioViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    queryset = Condominio.objects.all()
+    serializer_class = CondominioSerializer
+
+class ParametroCalculoViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    queryset = ParametroCalculo.objects.all()
+    serializer_class = ParametroCalculoSerializer
+
+# Views adicionais para rotas personalizadas
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def dashboard_condominios(request):
+    # Lógica para gerar dados do dashboard
+    return Response({"message": "Dados do dashboard"})
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def relatorio_economia(request):
+    # Lógica para gerar relatório de economia
+    return Response({"message": "Relatório de economia"})

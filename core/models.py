@@ -28,15 +28,21 @@ class CalculoCredito(models.Model):
     # Dados de cálculo de crédito de carbono
     emissao_carbono_atual = models.FloatField(
         validators=[MinValueValidator(0)],
-        help_text="Emissão de carbono do método atual de descarte (kg CO2)"
+        help_text="Emissão de carbono do método atual de descarte (kg CO2)",
+        blank=True, 
+        null=True,
     )
     emissao_carbono_reciclagem = models.FloatField(
         validators=[MinValueValidator(0)],
-        help_text="Emissão de carbono se reciclado (kg CO2)"
+        help_text="Emissão de carbono se reciclado (kg CO2)",
+        blank=True, 
+        null=True,
     )
     economia_carbono = models.FloatField(
         validators=[MinValueValidator(0)],
-        help_text="Economia de carbono pela reciclagem (kg CO2)"
+        help_text="Economia de carbono pela reciclagem (kg CO2)",
+        blank=True, 
+        null=True,
     )
     custo_descarte_atual = models.DecimalField(
         max_digits=10, 
