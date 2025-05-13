@@ -39,6 +39,8 @@ urlpatterns = [
     path('api/auth/', include('dj_rest_auth.urls')),
     # URLs para registro
     path('api/auth/registration/', include('dj_rest_auth.registration.urls')),
+    path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/auth/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 """
